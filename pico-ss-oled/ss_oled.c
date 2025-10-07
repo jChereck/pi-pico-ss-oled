@@ -646,7 +646,7 @@ int iType = pOLED->oled_type ;
     rc = OLED_SH1106_3C;
     pOLED->oled_type = OLED_132x64; // needs to be treated a little differently
   }
-  else if (u == 3 || u == 6) // 6=128x64 display, 3=smaller
+  else if (u == 3 || u == 4 || u == 6) // 6=128x64 display, 3=smaller, 4=variant
   {
     rc = OLED_SSD1306_3C;
   }
