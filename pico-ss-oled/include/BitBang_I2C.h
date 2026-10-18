@@ -64,6 +64,11 @@ enum {
 #define HIGH 1
 #endif
 
+// 7-bit address of the SSD1306 OLED. The on-wire write byte is 0x78.
+// New-batch panels do not drive SDA during ACK, so writes to this address
+// ignore NACK and reads to it are not issued.
+#define SSD1306_I2C_ADDR 0x3c
+
 typedef struct mybbi2c
 {
 uint8_t iSDA, iSCL; // pin numbers (0xff = disabled)
@@ -84,8 +89,10 @@ int I2CRead(BBI2C *pI2C, uint8_t iAddr, uint8_t *pData, int iLen);
 int I2CReadRegister(BBI2C *pI2C, uint8_t iAddr, uint8_t u8Register, uint8_t *pData, int iLen);
 //
 // Write I2C data
-// quits if a NACK is received and returns 0
-// otherwise returns the number of bytes written
+// For every address except SSD1306_I2C_ADDR, quits if a NACK is received
+// and returns 0. Otherwise returns the number of bytes written.
+// Writes to SSD1306_I2C_ADDR always clock out the full buffer; that panel
+// does not ACK, and the RP2040 I2C block would otherwise abort the transfer.
 //
 int I2CWrite(BBI2C *pI2C, uint8_t iAddr, uint8_t *pData, int iLen);
 //

@@ -613,8 +613,16 @@ int iType = pOLED->oled_type ;
   I2CInit(&pOLED->bbi2c, iSpeed); // on Linux, SDA = bus number, SCL = device address
   
   
+  // The SSD1306 at 0x3C does not ACK. A presence or ID read would NACK-abort
+  // and __oledInit would return OLED_NOT_FOUND before the init bytes go out.
+  // Caller already names the panel (OLED_128x64 @ 0x3C); skip reads.
+  if (iAddr == SSD1306_I2C_ADDR)
+  {
+    pOLED->oled_addr = SSD1306_I2C_ADDR;
+    rc = OLED_SSD1306_3C;
+  }
   // find the device address if requested
-  if (iAddr == -1 || iAddr == 0 || iAddr == 0xff) // find it
+  else if (iAddr == -1 || iAddr == 0 || iAddr == 0xff) // find it
   {
     I2CTest(&pOLED->bbi2c, 0x3c);
     if (I2CTest(&pOLED->bbi2c, 0x3c))
@@ -631,6 +639,8 @@ int iType = pOLED->oled_type ;
     if (!I2CTest(&pOLED->bbi2c, iAddr))
        return rc; // no display found
   }
+  if (pOLED->oled_addr != SSD1306_I2C_ADDR)
+  {
   // Detect the display controller (SSD1306, SH1107 or SH1106)
   uint8_t u = 0;
   I2CReadRegister(&pOLED->bbi2c, pOLED->oled_addr, 0x00, &u, 1); // read the status register
@@ -652,6 +662,7 @@ int iType = pOLED->oled_type ;
   }
   if (pOLED->oled_addr == 0x3d)
      rc++; // return the '3D' version of the type
+  }
 
   if (iType == OLED_128x32 || iType == OLED_96x16)
      _I2CWrite(pOLED,(unsigned char *)oled32_initbuf, sizeof(oled32_initbuf));

@@ -21,15 +21,130 @@
 #include "hardware/gpio.h"
 #include "pico/binary_info.h"
 #include "hardware/i2c.h"
+#include <stdbool.h>
 
 #include "BitBang_I2C.h"
 
+// ~100 kHz. Slower than the hardware bus is fine for the SSD1306.
+static const uint32_t BB_HALF_PERIOD_US = 5;
 
-//
-// Transmit a byte and read the ack bit
-// if we get a NACK (negative acknowledge) return 0
-// otherwise return 1 for success
-//
+static bool ssd1306_addr(uint8_t addr)
+{
+	return addr == SSD1306_I2C_ADDR;
+}
+
+static void bb_delay(void)
+{
+	busy_wait_us(BB_HALF_PERIOD_US);
+}
+
+// Open-drain: never drive the line high, so a healthy slave can still ACK.
+static void pin_release(uint pin)
+{
+	gpio_set_dir(pin, GPIO_IN);
+}
+
+static void pin_low(uint pin)
+{
+	gpio_put(pin, 0);
+	gpio_set_dir(pin, GPIO_OUT);
+}
+
+static void hw_i2c_pause(i2c_inst_t *i2c)
+{
+	i2c->hw->enable = 0;
+	// Don't hang the controller if the block never reports disabled.
+	for (int i = 0; i < 10000; ++i) {
+		if (!(i2c->hw->enable_status & I2C_IC_ENABLE_STATUS_IC_EN_BITS))
+			return;
+		busy_wait_us(1);
+	}
+}
+
+static void claim_pin(uint pin)
+{
+	gpio_put(pin, 0);
+	gpio_set_dir(pin, GPIO_IN);
+	gpio_set_function(pin, GPIO_FUNC_SIO);
+	gpio_pull_up(pin);
+}
+
+static void release_pin_to_i2c(uint pin)
+{
+	gpio_set_dir(pin, GPIO_IN);
+	gpio_set_function(pin, GPIO_FUNC_I2C);
+	gpio_pull_up(pin);
+}
+
+static void bb_start(uint sda, uint scl)
+{
+	pin_release(sda);
+	pin_release(scl);
+	bb_delay();
+	pin_low(sda);
+	bb_delay();
+	pin_low(scl);
+}
+
+static void bb_stop(uint sda, uint scl)
+{
+	pin_low(sda);
+	bb_delay();
+	pin_release(scl);
+	bb_delay();
+	pin_release(sda);
+	bb_delay();
+}
+
+// Clock out one byte, then a 9th bit that is not sampled.
+static void bb_write_byte_ignore_ack(uint sda, uint scl, uint8_t byte)
+{
+	for (int bit = 7; bit >= 0; --bit) {
+		if (byte & (1u << bit))
+			pin_release(sda);
+		else
+			pin_low(sda);
+		bb_delay();
+		pin_release(scl);
+		bb_delay();
+		pin_low(scl);
+	}
+	pin_release(sda);
+	bb_delay();
+	pin_release(scl);
+	bb_delay();
+	pin_low(scl);
+}
+
+// RP2040's I2C block (DW_apb_i2c) has no "continue on NACK" bit. An address
+// NACK aborts the transfer and flushes the TX FIFO, so retrying
+// i2c_write_blocking never puts the payload on the wire. Bit-bang the
+// transaction instead, and only for the display.
+static int i2c_write_ignore_nack(BBI2C *pI2C, uint8_t iAddr, uint8_t *pData, int iLen)
+{
+	uint sda = pI2C->iSDA;
+	uint scl = pI2C->iSCL;
+	i2c_inst_t *i2c = pI2C->picoI2C;
+
+	hw_i2c_pause(i2c);
+	i2c->restart_on_next = false;
+
+	claim_pin(sda);
+	claim_pin(scl);
+
+	bb_start(sda, scl);
+	// 7-bit address + write bit. 0x3C -> 0x78 on the wire.
+	bb_write_byte_ignore_ack(sda, scl, (uint8_t)(iAddr << 1));
+	for (int i = 0; i < iLen; ++i)
+		bb_write_byte_ignore_ack(sda, scl, pData[i]);
+	bb_stop(sda, scl);
+
+	release_pin_to_i2c(sda);
+	release_pin_to_i2c(scl);
+	i2c->hw->enable = 1;
+	return iLen;
+}
+
 //
 // Initialize the I2C BitBang library
 // Pass the pin numbers used for SDA and SCL
@@ -55,6 +170,8 @@ uint8_t I2CTest(BBI2C *pI2C, uint8_t addr)
 {
 	int ret;
     uint8_t rxdata;
+    if (ssd1306_addr(addr))
+        return 0; // display ACK output is dead; do not read it
     ret = i2c_read_blocking(pI2C->picoI2C, addr, &rxdata, 1, false);
     return (ret >= 0);
 } /* I2CTest() */
@@ -88,6 +205,11 @@ int I2CWrite(BBI2C *pI2C, uint8_t iAddr, uint8_t *pData, int iLen)
 {
 	int rc = 0;
 
+    if (pI2C == NULL || pI2C->picoI2C == NULL || pData == NULL || iLen <= 0)
+        return 0;
+    if (ssd1306_addr(iAddr))
+        return i2c_write_ignore_nack(pI2C, iAddr, pData, iLen);
+
     rc = i2c_write_blocking(pI2C->picoI2C, iAddr, pData, iLen, true); // true to keep master control of bus
     return rc >= 0 ? iLen : 0;
 
@@ -100,6 +222,9 @@ int I2CWrite(BBI2C *pI2C, uint8_t iAddr, uint8_t *pData, int iLen)
 int I2CReadRegister(BBI2C *pI2C, uint8_t iAddr, uint8_t u8Register, uint8_t *pData, int iLen)
 {
 	int rc;
+
+    if (ssd1306_addr(iAddr))
+        return 0; // display cannot drive SDA; skip the read
   
     rc = i2c_write_blocking(pI2C->picoI2C, iAddr, &u8Register, 1, true); // true to keep master control of bus 
     if (rc >= 0) {
@@ -114,6 +239,8 @@ int I2CReadRegister(BBI2C *pI2C, uint8_t iAddr, uint8_t u8Register, uint8_t *pDa
 int I2CRead(BBI2C *pI2C, uint8_t iAddr, uint8_t *pData, int iLen)
 {
 	int rc;
+    if (ssd1306_addr(iAddr))
+        return 0; // display cannot drive SDA; skip the read
     rc = i2c_read_blocking(pI2C->picoI2C, iAddr, pData, iLen, false);
     return (rc >= 0);
 	
